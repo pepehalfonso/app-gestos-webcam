@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+hand_landmarker.task
+.venv/
+venv/
+dist/
+build/
+*.spec
+.idea/
+.vscode/

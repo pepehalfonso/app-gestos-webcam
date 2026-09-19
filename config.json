@@ -1,0 +1,83 @@
+{
+  "camara": 1,
+  "cooldown_seg": 1.5,
+  "frames_estables": 5,
+  "mappings": [
+    {
+      "gesto": "mano_abierta",
+      "accion": "play_pause",
+      "activo": true
+    },
+    {
+      "gesto": "puno",
+      "accion": "mute",
+      "activo": true
+    },
+    {
+      "gesto": "uno",
+      "accion": "volumen_up",
+      "activo": true
+    },
+    {
+      "gesto": "dos_paz",
+      "accion": "screenshot",
+      "activo": true
+    },
+    {
+      "gesto": "tres_dedos",
+      "accion": "escritorio",
+      "activo": true
+    },
+    {
+      "gesto": "cuatro_dedos",
+      "accion": "alt_tab",
+      "activo": false
+    },
+    {
+      "gesto": "pulgar_arriba",
+      "accion": "volumen_up",
+      "activo": false
+    },
+    {
+      "gesto": "pulgar_abajo",
+      "accion": "volumen_down",
+      "activo": false
+    },
+    {
+      "gesto": "ok",
+      "accion": "click_izq",
+      "activo": true
+    },
+    {
+      "gesto": "rock",
+      "accion": "abrir_youtube",
+      "activo": true
+    },
+    {
+      "gesto": "pinza",
+      "accion": "click_der",
+      "activo": false
+    },
+    {
+      "gesto": "swipe_izquierda",
+      "accion": "flecha_izq",
+      "activo": false
+    },
+    {
+      "gesto": "swipe_derecha",
+      "accion": "flecha_der",
+      "activo": false
+    },
+    {
+      "gesto": "swipe_arriba",
+      "accion": "flecha_arriba",
+      "activo": false
+    },
+    {
+      "gesto": "swipe_abajo",
+      "accion": "flecha_abajo",
+      "activo": false
+    }
+  ],
+  "sonido": true
+}
