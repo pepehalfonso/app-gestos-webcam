@@ -6,8 +6,9 @@ App de escritorio en **Python** que usa tu **webcam + IA (MediaPipe)** para reco
 
 > ¿Sin Python? Descarga el **.exe para Windows** en
 > [**Releases**](https://github.com/pepehalfonso/app-gestos-webcam/releases):
-> descomprime el `.zip` y ejecuta `GestureControl.exe` (no requiere instalar nada).
 
+> descarga `Setup_GestureControl_v1.0.0.exe`, ejecútalo y sigue el asistente
+> (sin Python ni instalaciones extra).
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![MediaPipe](https://img.shields.io/badge/MediaPipe-Hands-green)
 ![OpenCV](https://img.shields.io/badge/OpenCV-video-red)
@@ -164,14 +165,25 @@ Tus gestos se guardan en `custom_gestos.json` y aparecen con `*` en Gestos.
 app.py               Interfaz + bucle de video
 gesture_detector.py  Detección MediaPipe (compatible 0.10.x y 1.x) + clasificador
 gestos_custom.py     Gestos personalizados entrenables (vectores + coincidencia)
+atajos.py            Atajos globales de teclado (Windows, sin dependencias)
 action_manager.py    Ejecución de acciones (pyautogui / sistema / links)
+GestureControl.iss   Script del instalador (Inno Setup)
 config.json          Tu mapeo gesto → acción
 custom_gestos.json   Tus gestos entrenados (se crea al entrenar)
 test_camara.py       Diagnóstico de webcam
 requirements.txt     Dependencias
 ```
 
-## Compilar a .exe (opcional)
+## Atajos globales
+
+Funcionan aunque la ventana no esté al frente (se activan al INICIAR):
+
+- `Ctrl+Alt+G`: iniciar / detener la detección
+- `Ctrl+Alt+M`: modo mouse aéreo on/off
+
+Se cambian en la página **Ajustes** (formato: modificador + tecla).
+
+## Compilar e instalador (opcional)
 
 ```powershell
 pip install pyinstaller
@@ -179,11 +191,22 @@ pyinstaller --onedir --windowed --name GestureControl `
   --add-data "config.json;." `
   --add-data "hand_landmarker.task;." `
   --collect-data mediapipe `
+  --collect-binaries mediapipe `
   app.py
 ```
 
-El ejecutable queda en `dist/GestureControl/`. El `config.json` se guarda
-junto al `.exe` y el modelo se incluye en el paquete.
+El ejecutable queda en `dist/GestureControl/`. OJO: no excluyas
+`matplotlib` (MediaPipe lo importa al arrancar).
+
+Para el instalador con asistente (ver `GestureControl.iss`):
+
+```powershell
+winget install -e --id JRSoftware.InnoSetup --silent
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" GestureControl.iss
+```
+
+Sale `dist/Setup_GestureControl_v1.0.0.exe` con icono opcional
+y arranque con Windows.
 
 ## Licencia
 

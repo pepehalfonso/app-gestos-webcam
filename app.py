@@ -21,6 +21,12 @@ from action_manager import (ejecutar, lista_acciones, ACCIONES, normalizar_accio
                               mover_cursor, tamano_pantalla)
 
 try:
+    from atajos import HotkeyManager, parse_combo, mostrar_combo
+    _HOTKEYS = True
+except Exception:
+    _HOTKEYS = False
+
+try:
     from PIL import Image, ImageTk
     _PIL = True
 except Exception:
@@ -256,6 +262,10 @@ class App:
         self.var_sonido = tk.BooleanVar(value=self.cfg.get("sonido", True))
         self.var_mouse = tk.BooleanVar(value=self.cfg.get("mouse_aereo", False))
         self.var_sens = tk.DoubleVar(value=self.cfg.get("sens_custom", self._gc["umbral"]))
+        self.var_atajo_toggle = tk.StringVar(value=self.cfg.get("atajo_toggle", "ctrl+alt+g"))
+        self.var_atajo_mouse = tk.StringVar(value=self.cfg.get("atajo_mouse", "ctrl+alt+m"))
+        self.hotkeys = None
+        self.mouse_vivo = False
         self.grabando = None  # {"nombre": str, "vecs": [...]} mientras se entrena
         self._fin_prog = False  # evita finalizar la grabacion dos veces
         self.detector = None  # detector vivo mientras corre la deteccion
@@ -453,6 +463,10 @@ class App:
         tk.Label(mrow, text="El indice mueve el cursor. Pinza = click izq, OK = click der.",
                  bg=CARD, fg=MUTED, font=("Segoe UI", 8), wraplength=260,
                  justify="left").pack(anchor="w")
+        self.lbl_atajos = tk.Label(rc, text="", bg=BG, fg=MUTED,
+                                   font=("Segoe UI", 8), wraplength=280, justify="left")
+        self.lbl_atajos.pack(fill="x", pady=2)
+        self._refrescar_atajos_lbl()
 
     # ---------- pagina GESTOS ----------
     def _build_gestos(self):
@@ -918,6 +932,27 @@ class App:
                   cursor="hand2", command=self.restablecer).pack(fill="x")
         tk.Label(c4, text="config.json se guarda automaticamente al iniciar.",
                  bg=CARD, fg=MUTED, font=("Segoe UI", 8), wraplength=300).pack(pady=6)
+        # atajos globales
+        c5 = tk.Frame(p, bg=CARD, padx=14, pady=12)
+        c5.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=6)
+        tk.Label(c5, text="ATAJOS GLOBALES (funcionan sin abrir la ventana)",
+                 bg=CARD, fg=MUTED, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        f1 = tk.Frame(c5, bg=CARD)
+        f1.pack(fill="x", pady=4)
+        tk.Label(f1, text="Iniciar / detener:", bg=CARD, fg=FG, width=18,
+                 anchor="w").pack(side="left")
+        tk.Entry(f1, textvariable=self.var_atajo_toggle, bg="#0d1220", fg=FG,
+                 insertbackground=FG, relief="flat", font=("Segoe UI", 10),
+                 width=18).pack(side="left", padx=6)
+        f2 = tk.Frame(c5, bg=CARD)
+        f2.pack(fill="x", pady=4)
+        tk.Label(f2, text="Mouse aereo on/off:", bg=CARD, fg=FG, width=18,
+                 anchor="w").pack(side="left")
+        tk.Entry(f2, textvariable=self.var_atajo_mouse, bg="#0d1220", fg=FG,
+                 insertbackground=FG, relief="flat", font=("Segoe UI", 10),
+                 width=18).pack(side="left", padx=6)
+        tk.Label(c5, text="Formato: modificador + tecla (ej: ctrl+alt+g). Se activan al INICIAR.",
+                 bg=CARD, fg=MUTED, font=("Segoe UI", 8)).pack(anchor="w")
 
     def _upd_vals(self):
         try:
@@ -954,7 +989,70 @@ class App:
         if not ejecutar(acc) and acc != "nada":
             self.log("  (sin efecto visible o accion desconocida)", "warn")
 
+    def _refrescar_atajos_lbl(self):
+        try:
+            t1 = self.var_atajo_toggle.get().strip() or "—"
+            t2 = self.var_atajo_mouse.get().strip() or "—"
+            self.lbl_atajos.config(text=f"Atajos globales: {t1} iniciar/detener · {t2} mouse")
+        except Exception:
+            pass
+
+    def _validar_atajos(self):
+        """Devuelve (t1, t2) o lanza ValueError con el problema."""
+        if not _HOTKEYS:
+            raise ValueError("atajos no disponibles en este sistema")
+        t1 = self.var_atajo_toggle.get().strip()
+        t2 = self.var_atajo_mouse.get().strip()
+        parse_combo(t1)
+        parse_combo(t2)
+        if t1.lower() == t2.lower():
+            raise ValueError("los dos atajos no pueden ser iguales")
+        return t1, t2
+
+    def _setup_hotkeys(self):
+        self._stop_hotkeys()
+        if not _HOTKEYS:
+            return
+        try:
+            t1, t2 = self._validar_atajos()
+        except ValueError as e:
+            self.log(f"Atajos desactivados: {e}", "warn")
+            return
+        try:
+            hk = HotkeyManager()
+            hk.register(t1, lambda: self.root.after(0, self._toggle_deteccion))
+            hk.register(t2, lambda: self.root.after(0, self._toggle_mouse))
+            self.hotkeys = hk
+            self.log(f"Atajos globales: {t1} y {t2}.", "ok")
+        except (RuntimeError, ValueError) as e:
+            self.log(f"Atajos desactivados: {e}", "warn")
+
+    def _stop_hotkeys(self):
+        hk, self.hotkeys = self.hotkeys, None
+        if hk is not None:
+            try:
+                hk.stop()
+            except Exception:
+                pass
+
+    def _toggle_deteccion(self):
+        if self.running:
+            self.detener()
+        else:
+            self.iniciar()
+
+    def _toggle_mouse(self):
+        nuevo = not bool(self.var_mouse.get())
+        self.var_mouse.set(nuevo)
+        self.mouse_vivo = nuevo
+        self.log(f"Modo mouse {'ON' if nuevo else 'OFF'} (atajo).", "ok")
+
     def guardar(self):
+        try:
+            self._validar_atajos()
+        except ValueError as e:
+            messagebox.showwarning("Atajos", str(e) + "\nCorrige los atajos antes de guardar.")
+            return
         maps = []
         for g in GESTOS:
             var_on, _cb = self.filas[g]
@@ -963,10 +1061,13 @@ class App:
                          "frames_estables": int(float(self.var_frames.get())),
                          "camara": int(self.var_cam.get()), "sonido": bool(self.var_sonido.get()),
                          "mouse_aereo": bool(self.var_mouse.get()),
-                         "sens_custom": float(self.var_sens.get())})
+                         "sens_custom": float(self.var_sens.get()),
+                         "atajo_toggle": self.var_atajo_toggle.get().strip(),
+                         "atajo_mouse": self.var_atajo_mouse.get().strip()})
         guardar_config(self.cfg)
         self.mapa = {m["gesto"]: m for m in maps}
         self._conteo_gestos()
+        self._refrescar_atajos_lbl()
         self.log("Configuracion guardada.", "ok")
         messagebox.showinfo("Guardado", f"Guardado en\n{CONFIG_PATH}")
 
@@ -979,8 +1080,11 @@ class App:
             cb.set(a)
         self.var_cooldown.set(1.5)
         self.var_frames.set(5)
+        self.var_atajo_toggle.set("ctrl+alt+g")
+        self.var_atajo_mouse.set("ctrl+alt+m")
         self._conteo_gestos()
         self._upd_vals()
+        self._refrescar_atajos_lbl()
 
     def iniciar(self):
         if self.running:
@@ -990,13 +1094,21 @@ class App:
         self.guardar_silencioso()
         self.running = True
         self.sesion_t0 = time.time()
+        self.mouse_vivo = bool(self.var_mouse.get())
         self._ui_estado(True)
+        self._setup_hotkeys()
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
         self.log("Deteccion iniciada.", "ok")
         self.show_page("envivo")
 
     def guardar_silencioso(self):
+        try:
+            self._validar_atajos()
+        except ValueError:
+            # revierte a los ultimos validos sin molestar
+            self.var_atajo_toggle.set(self.cfg.get("atajo_toggle", "ctrl+alt+g"))
+            self.var_atajo_mouse.set(self.cfg.get("atajo_mouse", "ctrl+alt+m"))
         maps = []
         for g in GESTOS:
             var_on, _cb = self.filas[g]
@@ -1006,10 +1118,13 @@ class App:
                          "frames_estables": int(float(self.var_frames.get())),
                          "camara": int(self.var_cam.get()), "sonido": bool(self.var_sonido.get()),
                          "mouse_aereo": bool(self.var_mouse.get()),
-                         "sens_custom": float(self.var_sens.get())})
+                         "sens_custom": float(self.var_sens.get()),
+                         "atajo_toggle": self.var_atajo_toggle.get().strip(),
+                         "atajo_mouse": self.var_atajo_mouse.get().strip()})
         guardar_config(self.cfg)
 
     def detener(self):
+        self._stop_hotkeys()
         self.running = False
         self._ui_estado(False)
         self.log("Deteccion detenida.", "sys")
@@ -1024,6 +1139,7 @@ class App:
         self.btn_stop.config(state="normal" if on else "disabled")
 
     def cerrar(self):
+        self._stop_hotkeys()
         self.running = False
         try:
             if self.cap:
@@ -1078,9 +1194,9 @@ class App:
             pass
         cand, racha, ult = None, 0, 0
         t0, nf = time.time(), 0
-        mouse_on = bool(self.var_mouse.get())
-        pant = tamano_pantalla() if mouse_on else None
-        if mouse_on:
+        self.mouse_vivo = bool(self.var_mouse.get())
+        pant = tamano_pantalla() if self.mouse_vivo else None
+        if self.mouse_vivo:
             if pant:
                 self.root.after(0, lambda: self.log("Modo mouse aereo ON: indice mueve, pinza=click izq, OK=click der.", "ok"))
             else:
@@ -1113,16 +1229,22 @@ class App:
                     txt = "—"
                 self.root.after(0, lambda t=txt: self.lbl_test_custom.config(text=t))
             # --- modo mouse aereo: indice -> cursor (con margenes y suavizado) ---
-            if mouse_on and pant and getattr(det, "mano_presente", False) and det.tip_indice:
-                tx, ty = det.tip_indice
-                nx = min(max((tx - 0.12) / (0.88 - 0.12), 0.0), 1.0)
-                ny = min(max((ty - 0.10) / (0.90 - 0.10), 0.0), 1.0)
-                sx, sy = nx * pant[0], ny * pant[1]
-                if not m_init:
-                    mcx, mcy, m_init = sx, sy, True
-                mcx += (sx - mcx) * 0.35
-                mcy += (sy - mcy) * 0.35
-                mover_cursor(mcx, mcy)
+            # self.mouse_vivo se lee en vivo (el atajo global puede cambiarlo)
+            if self.mouse_vivo and getattr(det, "mano_presente", False) and det.tip_indice:
+                if pant is None:
+                    pant = tamano_pantalla()
+                if pant:
+                    tx, ty = det.tip_indice
+                    nx = min(max((tx - 0.12) / (0.88 - 0.12), 0.0), 1.0)
+                    ny = min(max((ty - 0.10) / (0.90 - 0.10), 0.0), 1.0)
+                    sx, sy = nx * pant[0], ny * pant[1]
+                    if not m_init:
+                        mcx, mcy, m_init = sx, sy, True
+                    mcx += (sx - mcx) * 0.35
+                    mcy += (sy - mcy) * 0.35
+                    mover_cursor(mcx, mcy)
+                else:
+                    m_init = False
             else:
                 m_init = False
             if gesto:
@@ -1137,7 +1259,7 @@ class App:
                 self.root.after(0, lambda cc=c: self._pintar_cand(cc))
             if cand and racha >= fest:
                 # clicks del modo mouse (reservan pinza y OK)
-                if mouse_on and cand in ("pinza", "ok"):
+                if self.mouse_vivo and cand in ("pinza", "ok"):
                     ahora = time.time()
                     if (ahora - ult_click) > 0.9:
                         ult_click = ahora
