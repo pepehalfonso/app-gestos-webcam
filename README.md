@@ -1,8 +1,12 @@
 # GestureControl — Controla tu PC con gestos de la mano
 
 App de escritorio en **Python** que usa tu **webcam + IA (MediaPipe)** para reconocer
-**15 gestos de manos** y ejecutar **acciones** que tú mismo configuras
-(subir volumen, play/pausa, clicks, atajos, abrir apps, etc.).
+**gestos de manos** y ejecutar **acciones** que tú mismo configuras
+(subir volumen, play/pausa, clicks, abrir links, mover el mouse, etc.).
+
+> ¿Sin Python? Descarga el **.exe para Windows** en
+> [**Releases**](https://github.com/pepehalfonso/app-gestos-webcam/releases):
+> descomprime el `.zip` y ejecuta `GestureControl.exe` (no requiere instalar nada).
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![MediaPipe](https://img.shields.io/badge/MediaPipe-Hands-green)
@@ -11,7 +15,10 @@ App de escritorio en **Python** que usa tu **webcam + IA (MediaPipe)** para reco
 
 ## Características
 
-- **15 gestos**: 11 estáticos + 4 dinámicos (swipes)
+- **15 gestos base**: 11 estáticos + 4 dinámicos (swipes)
+- **Gestos personalizados**: entrena tus propias poses en la página Mis gestos
+- **Modo mouse aéreo**: el índice mueve el cursor, pinza = click izq, OK = click der
+- **Links por gesto**: botón Pegar link, al hacer el gesto se abre en tu navegador
 - **25 acciones**: teclas, multimedia, mouse, sistema y personalizadas
 - **Interfaz gráfica**: elige qué hace cada gesto, actívalo/desactívalo, prueba acciones
 - **Vista previa integrada** con FPS, gesto actual y registro de eventos
@@ -85,11 +92,32 @@ mouse (`click_izq`, `click_der`, `doble_click`), sistema
 (`screenshot`, `abrir_navegador`, `abrir_youtube`, `abrir_explorador`)
 y `nada` (sin efecto).
 
-### Acciones personalizadas
+### Links por gesto
 
-En el desplegable o directo en `config.json`:
+En la página **Gestos**, cada tarjeta tiene el botón **Pegar link**:
+pégalo, pulsa Probar y Guarda. Al hacer ese gesto, el link se abre
+en tu navegador predeterminado. También puedes escribir el link directo
+en el desplegable (se convierte solo a `abrir_url:...`).
 
-- `abrir_url:https://www.youtube.com` → abre esa página
+### Modo mouse aéreo
+
+En **En vivo**, activa **Modo mouse aéreo**: tu dedo índice mueve el cursor,
+**pinza** = click izquierdo y **OK** = click derecho.
+Mientras está activo, esos dos gestos quedan reservados para clicks.
+
+### Mis gestos (entrenables)
+
+En la página **Mis gestos** puedes crear gestos propios:
+
+1. Inicia la detección y pulsa **Nuevo gesto**.
+2. Mantén tu pose quieta 3 segundos (se capturan 40 muestras).
+3. Ve a **Gestos** y asígnale una acción como a cualquier otro.
+4. Ajusta la **sensibilidad** si coincide de más o de menos.
+
+Tus gestos se guardan en `custom_gestos.json` y aparecen con `*` en Gestos.
+
+### Otras acciones personalizadas
+
 - `comando:notepad` → ejecuta ese programa/comando de Windows
 
 ## Configuración (`config.json`)
@@ -100,6 +128,8 @@ En el desplegable o directo en `config.json`:
   "cooldown_seg": 1.5,
   "frames_estables": 5,
   "sonido": true,
+  "mouse_aereo": false,
+  "sens_custom": 0.22,
   "mappings": [
     {"gesto": "mano_abierta", "accion": "play_pause", "activo": true},
     {"gesto": "puno", "accion": "mute", "activo": true}
@@ -111,6 +141,8 @@ En el desplegable o directo en `config.json`:
 - `cooldown_seg`: segundos mínimos entre dos acciones
 - `frames_estables`: frames seguidos para confirmar un gesto (más = más preciso, menos = más rápido)
 - `sonido`: beep al detectar (Windows)
+- `mouse_aereo`: cursor con el índice, pinza/OK como clicks
+- `sens_custom`: umbral de coincidencia de tus gestos (menor = más estricto)
 
 ## Si la cámara no abre
 
@@ -131,8 +163,10 @@ En el desplegable o directo en `config.json`:
 ```text
 app.py               Interfaz + bucle de video
 gesture_detector.py  Detección MediaPipe (compatible 0.10.x y 1.x) + clasificador
-action_manager.py    Ejecución de acciones (pyautogui / sistema)
+gestos_custom.py     Gestos personalizados entrenables (vectores + coincidencia)
+action_manager.py    Ejecución de acciones (pyautogui / sistema / links)
 config.json          Tu mapeo gesto → acción
+custom_gestos.json   Tus gestos entrenados (se crea al entrenar)
 test_camara.py       Diagnóstico de webcam
 requirements.txt     Dependencias
 ```

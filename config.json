@@ -1,5 +1,5 @@
 {
-  "camara": 1,
+  "camara": 0,
   "cooldown_seg": 1.5,
   "frames_estables": 5,
   "mappings": [
@@ -20,7 +20,7 @@
     },
     {
       "gesto": "dos_paz",
-      "accion": "screenshot",
+      "accion": "abrir_url:https://www.youtube.com/",
       "activo": true
     },
     {
@@ -79,5 +79,7 @@
       "activo": false
     }
   ],
-  "sonido": true
+  "sonido": true,
+  "mouse_aereo": false,
+  "sens_custom": 0.22
 }

@@ -6,6 +6,7 @@ Soporta tambien acciones personalizadas:
 """
 import subprocess
 import webbrowser
+from urllib.parse import urlparse
 
 try:
     import pyautogui
@@ -35,6 +36,28 @@ def _click(boton="left", doble=False):
         pyautogui.doubleClick(button=boton)
     else:
         pyautogui.click(button=boton)
+
+
+def tamano_pantalla():
+    """Devuelve (ancho, alto) o None si pyautogui no esta disponible."""
+    if not _PYAUTO:
+        return None
+    try:
+        s = pyautogui.size()
+        return (s.width, s.height)
+    except Exception:
+        return None
+
+
+def mover_cursor(x, y):
+    """Mueve el cursor a coordenadas de pantalla. Devuelve True si pudo."""
+    if not _PYAUTO:
+        return False
+    try:
+        pyautogui.moveTo(int(x), int(y), duration=0)
+        return True
+    except Exception:
+        return False
 
 
 ACCIONES = {
@@ -70,12 +93,77 @@ def lista_acciones():
     return sorted(ACCIONES.keys())
 
 
-def descripcion(accion_id):
+def normalizar_url(texto):
+    """Limpia y valida un link. Devuelve la URL con esquema o None si no es valida."""
+    if not texto:
+        return None
+    t = texto.strip().strip("<>")
+    if t.lower().startswith("abrir_url:"):
+        t = t.split(":", 1)[1].strip()
+    if " " in t or not t:
+        return None
+    if "://" not in t:
+        t = "https://" + t
+    try:
+        p = urlparse(t)
+    except Exception:
+        return None
+    if p.scheme not in ("http", "https"):
+        return None
+    if "." not in (p.netloc or ""):
+        return None
+    return t
+
+
+def es_link(accion_id):
+    return isinstance(accion_id, str) and accion_id.startswith("abrir_url:")
+
+
+def accion_a_link(accion_id):
+    """Si la accion es un link, devuelve la URL. Si no, None."""
+    if es_link(accion_id):
+        return accion_id.split(":", 1)[1]
+    return None
+
+
+def normalizar_accion(valor):
+    """Convierte lo que escribe el usuario en un ID de accion valido.
+
+    - Si es una accion conocida, la devuelve tal cual.
+    - Si parece un link (http://, https://, www. o dominio), lo convierte a abrir_url:...
+    - Si no, lo devuelve recortado (sera tratado como desconocido al ejecutar).
+    """
+    if valor is None:
+        return "nada"
+    v = valor.strip()
+    if not v:
+        return "nada"
+    if v in ACCIONES or v.startswith(("abrir_url:", "comando:")):
+        return v
+    url = normalizar_url(v)
+    if url:
+        return "abrir_url:" + url
+    return v
+
+
+def nombre_amigable(accion_id):
+    """Texto corto para mostrar en la interfaz (links muestran el dominio)."""
     if accion_id in ACCIONES:
         return ACCIONES[accion_id]
-    if accion_id.startswith("abrir_url:") or accion_id.startswith("comando:"):
-        return accion_id
+    if es_link(accion_id):
+        url = accion_a_link(accion_id)
+        try:
+            host = urlparse(url).netloc or url
+            return "Abrir link: " + host
+        except Exception:
+            return "Abrir link"
+    if isinstance(accion_id, str) and accion_id.startswith("comando:"):
+        return "Ejecutar: " + accion_id.split(":", 1)[1]
     return accion_id
+
+
+def descripcion(accion_id):
+    return nombre_amigable(accion_id)
 
 
 def ejecutar(accion_id):
@@ -86,7 +174,12 @@ def ejecutar(accion_id):
 
         # acciones personalizadas
         if accion_id.startswith("abrir_url:"):
-            webbrowser.open(accion_id.split(":", 1)[1])
+            url = normalizar_url(accion_id)
+            if not url:
+                print(f"[accion] link invalido: {accion_id}")
+                return False
+            webbrowser.open(url, new=2)
+            print(f"[accion] link abierto: {url}")
             return True
         if accion_id.startswith("comando:"):
             cmd = accion_id.split(":", 1)[1]

@@ -18,6 +18,9 @@ from collections import deque, Counter
 import cv2
 import mediapipe as mp
 
+from gestos_custom import (extraer_vector, mejor_coincidencia, cargar as cargar_custom,
+                           UMBRAL_DEFAULT)
+
 
 GESTOS = [
     "mano_abierta",
@@ -86,6 +89,14 @@ class GestureDetector:
         self._frames_tras_swipe = 999
         self.backend = "none"
         self._t0 = time.time()
+        # expuestos para modo mouse y grabacion de gestos custom
+        self.mano_presente = False
+        self.tip_indice = None
+        self.ultimo_vector = None
+        self.ultimo_custom = (None, None)  # (nombre, distancia) del custom mas cercano
+        self.plantillas = []
+        self.umbral_custom = 0.22
+        self.recargar_custom()
 
         if _tiene_solutions():
             try:
@@ -278,9 +289,36 @@ class GestureDetector:
             return "swipe_abajo" if dy > 0 else "swipe_arriba"
         return None
 
+    def recargar_custom(self):
+        try:
+            self.plantillas = cargar_custom()
+        except Exception:
+            self.plantillas = []
+
+    def _custom_match(self, lm):
+        if not self.plantillas or self.ultimo_vector is None:
+            self.ultimo_custom = (None, None)
+            return None
+        best, d = mejor_coincidencia(self.ultimo_vector, self.plantillas,
+                                     self.umbral_custom)
+        nombre = best.get("nombre", best.get("id")) if best else None
+        self.ultimo_custom = (nombre, d)
+        return best.get("id") if best else None
+
     def _procesar(self, lm, handedness, frame):
         self.hist.append((lm[0].x, lm[0].y))
+        self.mano_presente = True
+        try:
+            self.tip_indice = (lm[8].x, lm[8].y)
+        except Exception:
+            self.tip_indice = None
+        try:
+            self.ultimo_vector = extraer_vector(lm)
+        except Exception:
+            self.ultimo_vector = None
         raw = self._estatico_raw(lm, handedness)
+        if raw is None:
+            raw = self._custom_match(lm)
         s = self._swipe()
         if s:
             self._last_swipe_t = time.time()
@@ -311,6 +349,10 @@ class GestureDetector:
                 else:
                     self.hist.clear()
                     self._smooth.append(None)
+                    self.mano_presente = False
+                    self.tip_indice = None
+                    self.ultimo_vector = None
+                    self.ultimo_custom = (None, None)
             else:
                 rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -329,6 +371,10 @@ class GestureDetector:
                 else:
                     self.hist.clear()
                     self._smooth.append(None)
+                    self.mano_presente = False
+                    self.tip_indice = None
+                    self.ultimo_vector = None
+                    self.ultimo_custom = (None, None)
         except Exception as e:
             print(f"[gestos] error detect: {e}")
         return frame_bgr, gesto

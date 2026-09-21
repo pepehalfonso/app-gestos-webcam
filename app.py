@@ -9,14 +9,16 @@ import sys
 import time
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 from datetime import datetime
 from collections import Counter
 
 import cv2
 
 from gesture_detector import GestureDetector, GESTOS
-from action_manager import ejecutar, lista_acciones, ACCIONES
+from action_manager import (ejecutar, lista_acciones, ACCIONES, normalizar_accion,
+                              normalizar_url, es_link, nombre_amigable,
+                              mover_cursor, tamano_pantalla)
 
 try:
     from PIL import Image, ImageTk
@@ -95,6 +97,20 @@ DEFAULT_MAP = [
 
 
 def cargar_config():
+    if not os.path.exists(CONFIG_PATH):
+        try:
+            if os.path.exists(CONFIG_DEFAULT) and CONFIG_DEFAULT != CONFIG_PATH:
+                with open(CONFIG_DEFAULT, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                return data
+        except Exception:
+            pass
+        return {"camara": 1, "cooldown_seg": 1.5, "frames_estables": 5,
+                "sonido": True, "mouse_aereo": False, "sens_custom": 0.22,
+                "mappings": [{"gesto": g, "accion": a, "activo": on}
+                             for g, a, on in DEFAULT_MAP]}
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -203,6 +219,25 @@ class App:
         for g, a, on in DEFAULT_MAP:
             if g not in self.mapa:
                 self.mapa[g] = {"gesto": g, "accion": a, "activo": on}
+        # gestos personalizados entrenados
+        from gestos_custom import (cargar as cargar_custom, guardar as guardar_custom,
+                                   promediar as promediar_custom,
+                                   siguiente_id as siguiente_id_custom,
+                                   UMBRAL_DEFAULT as UMBRAL_CUSTOM)
+        self._gc = {"cargar": cargar_custom, "guardar": guardar_custom,
+                    "promediar": promediar_custom, "siguiente_id": siguiente_id_custom,
+                    "umbral": UMBRAL_CUSTOM}
+        self.custom = self._gc["cargar"]()
+        for p in self.custom:
+            pid = p.get("id")
+            if pid and pid not in GESTOS:
+                GESTOS.append(pid)
+            if pid:
+                NOMBRES.setdefault(pid, p.get("nombre", pid))
+                DETALLE.setdefault(pid, "Gesto personalizado entrenado por ti")
+                ICONO.setdefault(pid, "*")
+                if pid not in self.mapa:
+                    self.mapa[pid] = {"gesto": pid, "accion": "nada", "activo": True}
 
         # estado
         self.running = False
@@ -219,6 +254,11 @@ class App:
         self.var_cooldown = tk.DoubleVar(value=self.cfg.get("cooldown_seg", 1.5))
         self.var_frames = tk.IntVar(value=self.cfg.get("frames_estables", 5))
         self.var_sonido = tk.BooleanVar(value=self.cfg.get("sonido", True))
+        self.var_mouse = tk.BooleanVar(value=self.cfg.get("mouse_aereo", False))
+        self.var_sens = tk.DoubleVar(value=self.cfg.get("sens_custom", self._gc["umbral"]))
+        self.grabando = None  # {"nombre": str, "vecs": [...]} mientras se entrena
+        self._fin_prog = False  # evita finalizar la grabacion dos veces
+        self.detector = None  # detector vivo mientras corre la deteccion
         self.var_buscar = tk.StringVar()
         self.var_filtro = tk.StringVar(value="Todos")
         self.var_buscar.trace_add("write", lambda *_a: self._filtrar_gestos())
@@ -262,7 +302,8 @@ class App:
                  font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(0, 14))
         self.nav_btns = {}
         for key, txt, sub in [("envivo", "En vivo", "camara y deteccion"),
-                              ("gestos", "Gestos", "15 gestos -> accion"),
+                              ("gestos", "Gestos", "gestos -> accion"),
+                              ("misgestos", "Mis gestos", "entrena los tuyos"),
                               ("actividad", "Actividad", "historial y stats"),
                               ("ajustes", "Ajustes", "camara y sistema")]:
             b = tk.Button(side, bg=SIDEBAR, fg=MUTED, anchor="w", relief="flat",
@@ -301,11 +342,12 @@ class App:
         self.holder = tk.Frame(main, bg=BG)
         self.holder.pack(fill="both", expand=True, padx=18, pady=8)
         self.pages = {}
-        for k in ("envivo", "gestos", "actividad", "ajustes"):
+        for k in ("envivo", "gestos", "misgestos", "actividad", "ajustes"):
             f = tk.Frame(self.holder, bg=BG)
             self.pages[k] = f
         self._build_envivo()
         self._build_gestos()
+        self._build_misgestos()
         self._build_actividad()
         self._build_ajustes()
 
@@ -316,6 +358,7 @@ class App:
         self.pages[key].pack(fill="both", expand=True)
         tit = {"envivo": ("En vivo", "Tu mano en tiempo real"),
                "gestos": ("Gestos", "Que hace cada gesto"),
+               "misgestos": ("Mis gestos", "Entrena gestos a tu manera"),
                "actividad": ("Actividad", "Que paso en tu sesion"),
                "ajustes": ("Ajustes", "Camara, tiempos y sistema")}[key]
         self.lbl_title.config(text=tit[0])
@@ -395,11 +438,21 @@ class App:
                                   font=("Segoe UI", 10), relief="flat", cursor="hand2",
                                   pady=8, command=self.detener)
         self.btn_stop.pack(fill="x")
-        # sonido
+        # sonido + modo mouse
         srow = tk.Frame(rc, bg=BG)
-        srow.pack(fill="x", pady=8)
+        srow.pack(fill="x", pady=(8, 0))
         tk.Label(srow, text="Sonido al detectar:", bg=BG, fg=MUTED).pack(side="left")
         Toggle(srow, self.var_sonido).pack(side="right")
+        mrow = tk.Frame(rc, bg=CARD, padx=10, pady=8)
+        mrow.pack(fill="x", pady=6)
+        mtop = tk.Frame(mrow, bg=CARD)
+        mtop.pack(fill="x")
+        tk.Label(mtop, text="Modo mouse aereo", bg=CARD, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        Toggle(mtop, self.var_mouse).pack(side="right")
+        tk.Label(mrow, text="El indice mueve el cursor. Pinza = click izq, OK = click der.",
+                 bg=CARD, fg=MUTED, font=("Segoe UI", 8), wraplength=260,
+                 justify="left").pack(anchor="w")
 
     # ---------- pagina GESTOS ----------
     def _build_gestos(self):
@@ -436,6 +489,7 @@ class App:
 
         self.g_cards = {}
         self.filas = {}
+        self.link_lbls = {}
         acciones = lista_acciones()
         for g in GESTOS:
             card = tk.Frame(self.g_inner, bg=CARD, padx=12, pady=10)
@@ -455,22 +509,91 @@ class App:
                      font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(8, 0))
             tk.Label(card, text=DETALLE.get(g, ""), bg=CARD, fg=MUTED,
                      font=("Segoe UI", 9), wraplength=220, justify="left").pack(anchor="w")
-            cb = ttk.Combobox(card, values=acciones, state="readonly", width=24)
+            cb = ttk.Combobox(card, values=acciones, width=24)
             actual = m.get("accion", "nada")
             if actual not in acciones:
                 cb["values"] = acciones + [actual]
             cb.set(actual)
-            cb.pack(fill="x", pady=6)
-            tk.Button(card, text="Probar accion", bg=CARD2, fg=FG, relief="flat",
-                      cursor="hand2", command=lambda gg=g: self.probar_accion(gg)).pack(fill="x")
+            cb.pack(fill="x", pady=(6, 2))
+            cb.bind("<<ComboboxSelected>>", lambda _e, gg=g: self._refrescar_link_lbl(gg))
+            cb.bind("<FocusOut>", lambda _e, gg=g: self._refrescar_link_lbl(gg))
+            self.link_lbls[g] = tk.Label(card, text="", bg=CARD, fg=ACCENT,
+                                         font=("Segoe UI", 8), anchor="w",
+                                         wraplength=220, justify="left")
+            self.link_lbls[g].pack(fill="x")
+            brow = tk.Frame(card, bg=CARD)
+            brow.pack(fill="x", pady=(4, 0))
+            tk.Button(brow, text="Probar", bg=CARD2, fg=FG, relief="flat",
+                      cursor="hand2", command=lambda gg=g: self.probar_accion(gg)).pack(
+                      side="left", fill="x", expand=True, padx=(0, 3))
+            tk.Button(brow, text="Pegar link", bg="#0d2b36", fg=ACCENT, relief="flat",
+                      cursor="hand2", command=lambda gg=g: self.asignar_link(gg)).pack(
+                      side="left", fill="x", expand=True, padx=(3, 0))
             # hover
             for w in (card,):
                 w.bind("<Enter>", lambda e, c=card: c.config(bg=CARD2))
                 w.bind("<Leave>", lambda e, c=card: c.config(bg=CARD))
             self.g_cards[g] = card
             self.filas[g] = (var_on, cb)
+        for g in GESTOS:
+            self._refrescar_link_lbl(g)
         self._conteo_gestos()
         self._filtrar_gestos()
+
+    def _leer_accion(self, gesto):
+        """Lee el combo y lo normaliza (un link pegado se vuelve abrir_url:...)."""
+        _on, cb = self.filas[gesto]
+        acc = normalizar_accion(cb.get())
+        if acc != cb.get().strip():
+            cb.set(acc)
+        self._refrescar_link_lbl(gesto)
+        return acc
+
+    def _refrescar_link_lbl(self, gesto):
+        try:
+            lbl = self.link_lbls[gesto]
+        except (AttributeError, KeyError):
+            return
+        _on, cb = self.filas[gesto]
+        acc = normalizar_accion(cb.get())
+        if es_link(acc):
+            from urllib.parse import urlparse
+            try:
+                host = urlparse(acc.split(":", 1)[1]).netloc
+            except Exception:
+                host = acc.split(":", 1)[1]
+            lbl.config(text="Link: " + (host or acc.split(":", 1)[1]))
+        else:
+            lbl.config(text="")
+
+    def asignar_link(self, gesto):
+        """Pide un link y se lo asigna al gesto: al hacerlo se abre en el navegador."""
+        _on, cb = self.filas[gesto]
+        actual = cb.get()
+        if es_link(actual):
+            actual = actual.split(":", 1)[1]
+        elif actual in ACCIONES:
+            actual = ""
+        url = simpledialog.askstring(
+            "Pegar link",
+            f"Link para '{NOMBRES.get(gesto, gesto)}':\n"
+            "Al hacer este gesto se abrira en tu navegador.",
+            initialvalue=actual or "https://",
+            parent=self.root,
+        )
+        if url is None:
+            return
+        ok = normalizar_url(url)
+        if not ok:
+            messagebox.showwarning(
+                "Link invalido",
+                "Eso no parece un link valido.\nEjemplos: https://youtube.com  o  www.google.com",
+            )
+            return
+        cb.set("abrir_url:" + ok)
+        self._refrescar_link_lbl(gesto)
+        self._filtrar_gestos()
+        self.log(f"Link asignado a {NOMBRES.get(gesto, gesto)}: {ok}", "ok")
 
     def _conteo_gestos(self):
         try:
@@ -484,7 +607,8 @@ class App:
         f = self.var_filtro.get()
         for g, card in self.g_cards.items():
             var_on, cb = self.filas[g]
-            txt = (NOMBRES.get(g, g) + " " + g + " " + cb.get()).lower()
+            txt = (NOMBRES.get(g, g) + " " + g + " " + cb.get() + " "
+                   + nombre_amigable(normalizar_accion(cb.get()))).lower()
             ok_q = (q in txt) if q else True
             ok_f = True
             if f == "Activos":
@@ -495,6 +619,209 @@ class App:
                 card.grid()
             else:
                 card.grid_remove()
+
+    # ---------- pagina MIS GESTOS ----------
+    def _build_misgestos(self):
+        p = self.pages["misgestos"]
+        p.columnconfigure(0, weight=3)
+        p.columnconfigure(1, weight=2)
+
+        left = tk.Frame(p, bg=CARD, padx=14, pady=12)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        tk.Label(left, text="COMO ENTRENAR", bg=CARD, fg=MUTED,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        tk.Label(left, text=("1. Inicia la deteccion.\n"
+                             "2. Pulsa Nuevo gesto y ponle nombre.\n"
+                             "3. Manten tu pose 3 segundos sin moverte.\n"
+                             "4. Asignale una accion en la pagina Gestos."),
+                 bg=CARD, fg=FG, font=("Segoe UI", 10), justify="left").pack(anchor="w", pady=6)
+        tk.Button(left, text="Nuevo gesto", bg=ACCENT, fg="#052530",
+                  font=("Segoe UI", 11, "bold"), relief="flat", cursor="hand2",
+                  pady=8, command=self.nuevo_custom).pack(fill="x", pady=4)
+        self.lbl_grab = tk.Label(left, text="Sin grabacion en curso.", bg=CARD, fg=MUTED,
+                                 font=("Segoe UI", 10))
+        self.lbl_grab.pack(anchor="w", pady=2)
+        self.bar_grab = ttk.Progressbar(left, mode="determinate", maximum=40,
+                                        style="Horizontal.TProgressbar")
+        self.bar_grab.pack(fill="x", pady=4)
+        tk.Button(left, text="Cancelar grabacion", bg=CARD2, fg=FG, relief="flat",
+                  cursor="hand2", command=self.cancelar_custom).pack(fill="x")
+
+        tk.Label(left, text="Sensibilidad de coincidencia:", bg=CARD, fg=FG,
+                 font=("Segoe UI", 10)).pack(anchor="w", pady=(10, 0))
+        ttk.Scale(left, from_=0.08, to=0.40, variable=self.var_sens,
+                  orient="horizontal",
+                  command=lambda _e: self._upd_sens()).pack(fill="x")
+        self.lbl_sens = tk.Label(left, text="", bg=CARD, fg=ACCENT,
+                                 font=("Segoe UI", 10, "bold"))
+        self.lbl_sens.pack(anchor="w")
+        self._upd_sens()
+        tk.Label(left, text="Prueba en vivo (con deteccion corriendo):",
+                 bg=CARD, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
+        self.lbl_test_custom = tk.Label(left, text="—", bg="#0d1220", fg=FG,
+                                        font=("Consolas", 10), padx=8, pady=6)
+        self.lbl_test_custom.pack(fill="x", pady=4)
+
+        right = tk.Frame(p, bg=CARD, padx=14, pady=12)
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        tk.Label(right, text="MIS GESTOS", bg=CARD, fg=MUTED,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self.frm_custom_list = tk.Frame(right, bg=CARD)
+        self.frm_custom_list.pack(fill="both", expand=True, pady=6)
+        self._refrescar_lista_custom()
+
+    def _upd_sens(self):
+        try:
+            v = float(self.var_sens.get())
+            self.lbl_sens.config(text=f"{v:.2f}  (menor = mas estricto)")
+            if self.detector is not None:
+                self.detector.umbral_custom = v
+        except Exception:
+            pass
+
+    def _refrescar_lista_custom(self):
+        for w in self.frm_custom_list.winfo_children():
+            w.destroy()
+        if not self.custom:
+            tk.Label(self.frm_custom_list, text="Aun no tienes gestos propios.\nCrea el primero con Nuevo gesto.",
+                     bg=CARD, fg=MUTED, justify="left").pack(anchor="w")
+            return
+        for pl in self.custom:
+            pid = pl.get("id")
+            row = tk.Frame(self.frm_custom_list, bg=CARD2, padx=8, pady=6)
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=pl.get("nombre", pid), bg=CARD2, fg=FG,
+                     font=("Segoe UI", 10, "bold")).pack(side="left")
+            tk.Label(row, text=f"{pl.get('muestras', 0)} muestras", bg=CARD2, fg=MUTED,
+                     font=("Segoe UI", 8)).pack(side="left", padx=6)
+            tk.Button(row, text="Eliminar", bg="#3a2230", fg="#ff9aab", relief="flat",
+                      cursor="hand2", command=lambda i=pid: self.eliminar_custom(i)).pack(side="right")
+
+    def nuevo_custom(self):
+        if self.grabando is not None:
+            messagebox.showinfo("Grabando", "Ya hay una grabacion en curso.")
+            return
+        if not self.running:
+            messagebox.showinfo("Sin deteccion",
+                                "Primero pulsa INICIAR en En vivo y luego vuelve aqui.")
+            self.show_page("envivo")
+            return
+        nombre = simpledialog.askstring("Nuevo gesto", "Nombre del gesto (ej: Cuernos):",
+                                        parent=self.root)
+        if not nombre:
+            return
+        nombre = nombre.strip()[:30]
+        if not nombre:
+            return
+        if any(p.get("nombre", "").lower() == nombre.lower() for p in self.custom):
+            messagebox.showwarning("Duplicado", "Ya existe un gesto con ese nombre.")
+            return
+        self.grabando = {"nombre": nombre, "vecs": []}
+        self.bar_grab.config(value=0)
+        self.lbl_grab.config(text=f"Grabando '{nombre}': manten la pose quieto…")
+        self.log(f"Grabando gesto '{nombre}'…", "gesto")
+
+    def cancelar_custom(self):
+        if self.grabando is not None:
+            self.log("Grabacion cancelada.", "warn")
+        self.grabando = None
+        self._fin_prog = False
+        self.bar_grab.config(value=0)
+        self.lbl_grab.config(text="Sin grabacion en curso.")
+
+    def _fin_grabacion(self):
+        self._fin_prog = False
+        g = self.grabando
+        self.grabando = None
+        self.bar_grab.config(value=0)
+        if not g or len(g["vecs"]) < 15:
+            self.lbl_grab.config(text="Muy pocas muestras: repite mas quieto.")
+            self.log("Grabacion fallida: pocas muestras.", "err")
+            return
+        pid = self._gc["siguiente_id"](self.custom)
+        nuevo = {"id": pid, "nombre": g["nombre"],
+                 "vector": self._gc["promediar"](g["vecs"]),
+                 "muestras": len(g["vecs"]), "umbral": float(self.var_sens.get())}
+        self.custom.append(nuevo)
+        self._gc["guardar"](self.custom)
+        if pid not in GESTOS:
+            GESTOS.append(pid)
+        NOMBRES[pid] = g["nombre"]
+        DETALLE[pid] = "Gesto personalizado entrenado por ti"
+        ICONO[pid] = "*"
+        self.mapa[pid] = {"gesto": pid, "accion": "nada", "activo": True}
+        self._agregar_tarjeta(pid)
+        self.guardar_silencioso()
+        if self.detector is not None:
+            self.detector.recargar_custom()
+        self.lbl_grab.config(text=f"Gesto '{g['nombre']}' guardado. Asignale accion en Gestos.")
+        self.log(f"Gesto '{g['nombre']}' entrenado con {len(g['vecs'])} muestras.", "ok")
+        self._refrescar_lista_custom()
+
+    def _agregar_tarjeta(self, pid):
+        acciones = lista_acciones()
+        n = len(self.g_cards)
+        card = tk.Frame(self.g_inner, bg=CARD, padx=12, pady=10)
+        card.grid(row=n // 3, column=n % 3, sticky="nsew", padx=5, pady=5)
+        top = tk.Frame(card, bg=CARD)
+        top.pack(fill="x")
+        tk.Label(top, text=ICONO.get(pid, "*"), bg="#0d2b36", fg=ACCENT,
+                 font=("Segoe UI", 12, "bold"), width=4, pady=4).pack(side="left")
+        var_on = tk.BooleanVar(value=True)
+        Toggle(top, var_on, command=self._conteo_gestos).pack(side="right")
+        tk.Label(card, text=NOMBRES.get(pid, pid), bg=CARD, fg=FG,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        tk.Label(card, text=DETALLE.get(pid, ""), bg=CARD, fg=MUTED,
+                 font=("Segoe UI", 9), wraplength=220, justify="left").pack(anchor="w")
+        cb = ttk.Combobox(card, values=acciones, width=24)
+        cb.set("nada")
+        cb.pack(fill="x", pady=(6, 2))
+        cb.bind("<<ComboboxSelected>>", lambda _e, gg=pid: self._refrescar_link_lbl(gg))
+        cb.bind("<FocusOut>", lambda _e, gg=pid: self._refrescar_link_lbl(gg))
+        self.link_lbls[pid] = tk.Label(card, text="", bg=CARD, fg=ACCENT,
+                                       font=("Segoe UI", 8), anchor="w",
+                                       wraplength=220, justify="left")
+        self.link_lbls[pid].pack(fill="x")
+        brow = tk.Frame(card, bg=CARD)
+        brow.pack(fill="x", pady=(4, 0))
+        tk.Button(brow, text="Probar", bg=CARD2, fg=FG, relief="flat",
+                  cursor="hand2", command=lambda gg=pid: self.probar_accion(gg)).pack(
+                  side="left", fill="x", expand=True, padx=(0, 3))
+        tk.Button(brow, text="Pegar link", bg="#0d2b36", fg=ACCENT, relief="flat",
+                  cursor="hand2", command=lambda gg=pid: self.asignar_link(gg)).pack(
+                  side="left", fill="x", expand=True, padx=(3, 0))
+        self.g_cards[pid] = card
+        self.filas[pid] = (var_on, cb)
+        self._conteo_gestos()
+        self._filtrar_gestos()
+
+    def eliminar_custom(self, pid):
+        nombre = NOMBRES.get(pid, pid)
+        if not messagebox.askyesno("Eliminar", f"Eliminar el gesto '{nombre}'?"):
+            return
+        self.custom = [p for p in self.custom if p.get("id") != pid]
+        self._gc["guardar"](self.custom)
+        try:
+            GESTOS.remove(pid)
+        except ValueError:
+            pass
+        for d in (NOMBRES, DETALLE, ICONO):
+            d.pop(pid, None)
+        self.mapa.pop(pid, None)
+        try:
+            self.g_cards[pid].destroy()
+            del self.g_cards[pid]
+            del self.filas[pid]
+            del self.link_lbls[pid]
+        except KeyError:
+            pass
+        if self.detector is not None:
+            self.detector.recargar_custom()
+        self.guardar_silencioso()
+        self._conteo_gestos()
+        self._filtrar_gestos()
+        self._refrescar_lista_custom()
+        self.log(f"Gesto '{nombre}' eliminado.", "warn")
 
     # ---------- pagina ACTIVIDAD ----------
     def _build_actividad(self):
@@ -622,19 +949,21 @@ class App:
             self.log(f"Camaras: {found}", "ok")
 
     def probar_accion(self, gesto):
-        _on, cb = self.filas[gesto]
-        acc = cb.get().strip()
-        self.log(f"Prueba {NOMBRES.get(gesto, gesto)} -> {acc}", "gesto")
-        ejecutar(acc)
+        acc = self._leer_accion(gesto)
+        self.log(f"Prueba {NOMBRES.get(gesto, gesto)} -> {nombre_amigable(acc)}", "gesto")
+        if not ejecutar(acc) and acc != "nada":
+            self.log("  (sin efecto visible o accion desconocida)", "warn")
 
     def guardar(self):
         maps = []
         for g in GESTOS:
-            var_on, cb = self.filas[g]
-            maps.append({"gesto": g, "accion": cb.get().strip(), "activo": bool(var_on.get())})
+            var_on, _cb = self.filas[g]
+            maps.append({"gesto": g, "accion": self._leer_accion(g), "activo": bool(var_on.get())})
         self.cfg.update({"mappings": maps, "cooldown_seg": float(self.var_cooldown.get()),
                          "frames_estables": int(float(self.var_frames.get())),
-                         "camara": int(self.var_cam.get()), "sonido": bool(self.var_sonido.get())})
+                         "camara": int(self.var_cam.get()), "sonido": bool(self.var_sonido.get()),
+                         "mouse_aereo": bool(self.var_mouse.get()),
+                         "sens_custom": float(self.var_sens.get())})
         guardar_config(self.cfg)
         self.mapa = {m["gesto"]: m for m in maps}
         self._conteo_gestos()
@@ -670,12 +999,14 @@ class App:
     def guardar_silencioso(self):
         maps = []
         for g in GESTOS:
-            var_on, cb = self.filas[g]
-            maps.append({"gesto": g, "accion": cb.get().strip(), "activo": bool(var_on.get())})
+            var_on, _cb = self.filas[g]
+            maps.append({"gesto": g, "accion": self._leer_accion(g), "activo": bool(var_on.get())})
         self.mapa = {m["gesto"]: m for m in maps}
         self.cfg.update({"mappings": maps, "cooldown_seg": float(self.var_cooldown.get()),
                          "frames_estables": int(float(self.var_frames.get())),
-                         "camara": int(self.var_cam.get()), "sonido": bool(self.var_sonido.get())})
+                         "camara": int(self.var_cam.get()), "sonido": bool(self.var_sonido.get()),
+                         "mouse_aereo": bool(self.var_mouse.get()),
+                         "sens_custom": float(self.var_sens.get())})
         guardar_config(self.cfg)
 
     def detener(self):
@@ -740,8 +1071,22 @@ class App:
         if usado != cam_id:
             self.root.after(0, lambda u=usado: self.var_cam.set(u))
         self.root.after(0, lambda: self.log(f"Camara {usado} lista.", "ok"))
+        self.detector = det
+        try:
+            det.umbral_custom = float(self.var_sens.get())
+        except Exception:
+            pass
         cand, racha, ult = None, 0, 0
         t0, nf = time.time(), 0
+        mouse_on = bool(self.var_mouse.get())
+        pant = tamano_pantalla() if mouse_on else None
+        if mouse_on:
+            if pant:
+                self.root.after(0, lambda: self.log("Modo mouse aereo ON: indice mueve, pinza=click izq, OK=click der.", "ok"))
+            else:
+                self.root.after(0, lambda: self.log("Modo mouse sin efecto: pyautogui no disponible.", "warn"))
+        mcx, mcy, m_init = 0.0, 0.0, False
+        ult_click = 0.0
         while self.running:
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -749,6 +1094,37 @@ class App:
                 continue
             frame = cv2.flip(frame, 1)
             frame, gesto = det.detect(frame)
+            # --- grabacion de gesto personalizado ---
+            if self.grabando is not None and getattr(det, "mano_presente", False) \
+                    and det.ultimo_vector is not None:
+                self.grabando["vecs"].append(list(det.ultimo_vector))
+                n = len(self.grabando["vecs"])
+                self.root.after(0, lambda v=n: self.bar_grab.config(value=v))
+                if n >= 40 and not self._fin_prog:
+                    self._fin_prog = True
+                    self.root.after(0, self._fin_grabacion)
+            # --- lectura de prueba en vivo (pagina Mis gestos) ---
+            if nf % 15 == 0:
+                try:
+                    nm, dd = det.ultimo_custom
+                    txt = f"{nm}  dist={dd:.3f}" if nm else (
+                        f"ninguno  (cerca: {dd:.3f})" if dd is not None else "—")
+                except Exception:
+                    txt = "—"
+                self.root.after(0, lambda t=txt: self.lbl_test_custom.config(text=t))
+            # --- modo mouse aereo: indice -> cursor (con margenes y suavizado) ---
+            if mouse_on and pant and getattr(det, "mano_presente", False) and det.tip_indice:
+                tx, ty = det.tip_indice
+                nx = min(max((tx - 0.12) / (0.88 - 0.12), 0.0), 1.0)
+                ny = min(max((ty - 0.10) / (0.90 - 0.10), 0.0), 1.0)
+                sx, sy = nx * pant[0], ny * pant[1]
+                if not m_init:
+                    mcx, mcy, m_init = sx, sy, True
+                mcx += (sx - mcx) * 0.35
+                mcy += (sy - mcy) * 0.35
+                mover_cursor(mcx, mcy)
+            else:
+                m_init = False
             if gesto:
                 cand, racha = (gesto, racha + 1) if gesto == cand else (gesto, 1)
             else:
@@ -760,24 +1136,40 @@ class App:
                 c = cand
                 self.root.after(0, lambda cc=c: self._pintar_cand(cc))
             if cand and racha >= fest:
-                m = self.mapa.get(cand, {})
-                ahora = time.time()
-                if m.get("activo") and (ahora - ult) > cd:
-                    acc = m.get("accion", "nada")
-                    ejecutar(acc)
-                    ult = ahora
-                    self.total_gestos += 1
-                    self.total_acciones += 1
-                    self.por_gesto[cand] += 1
-                    g, a = cand, acc
-                    self.root.after(0, lambda gg=g, aa=a: self._pintar_hit(gg, aa))
-                    self.root.after(0, lambda gg=g, aa=a: self.log(f"{NOMBRES.get(gg, gg)} -> {aa}", "gesto"))
-                    if self.var_sonido.get() and _SOUND:
-                        try:
-                            winsound.Beep(880, 110)
-                        except Exception:
-                            pass
+                # clicks del modo mouse (reservan pinza y OK)
+                if mouse_on and cand in ("pinza", "ok"):
+                    ahora = time.time()
+                    if (ahora - ult_click) > 0.9:
+                        ult_click = ahora
+                        click_acc = "click_izq" if cand == "pinza" else "click_der"
+                        ejecutar(click_acc)
+                        self.total_gestos += 1
+                        self.total_acciones += 1
+                        self.por_gesto[cand] += 1
+                        g, a = cand, click_acc
+                        self.root.after(0, lambda gg=g, aa=a: self._pintar_hit(gg, aa))
+                        self.root.after(0, lambda gg=g, aa=a: self.log(f"{NOMBRES.get(gg, gg)} -> {nombre_amigable(aa)}", "gesto"))
                     cand, racha = None, 0
+                    # sigue al flujo normal de video (nf, fps, frame) sin disparar mapeo
+                else:
+                    m = self.mapa.get(cand, {})
+                    ahora = time.time()
+                    if m.get("activo") and (ahora - ult) > cd:
+                        acc = m.get("accion", "nada")
+                        ejecutar(acc)
+                        ult = ahora
+                        self.total_gestos += 1
+                        self.total_acciones += 1
+                        self.por_gesto[cand] += 1
+                        g, a = cand, acc
+                        self.root.after(0, lambda gg=g, aa=a: self._pintar_hit(gg, aa))
+                        self.root.after(0, lambda gg=g, aa=a: self.log(f"{NOMBRES.get(gg, gg)} -> {nombre_amigable(aa)}", "gesto"))
+                        if self.var_sonido.get() and _SOUND:
+                            try:
+                                winsound.Beep(880, 110)
+                            except Exception:
+                                pass
+                        cand, racha = None, 0
             nf += 1
             if time.time() - t0 >= 1.0:
                 fps = nf / max(time.time() - t0, 0.01)
@@ -792,6 +1184,9 @@ class App:
         except Exception:
             pass
         self.cap = None
+        self.detector = None
+        self.grabando = None
+        self._fin_prog = False
         self.root.after(0, self.detener)
 
     def _pintar_cand(self, c):
@@ -801,7 +1196,7 @@ class App:
     def _pintar_hit(self, g, a):
         self.lbl_gesto.config(text=NOMBRES.get(g, g))
         self.lbl_gesto_det.config(text=DETALLE.get(g, ""))
-        self.lbl_accion.config(text=f"→ {ACCIONES.get(a, a)}")
+        self.lbl_accion.config(text=f"→ {nombre_amigable(a)}")
         self.stat_vars["gestos"].config(text=str(self.total_gestos))
         self.stat_vars["acciones"].config(text=str(self.total_acciones))
         self.lbl_atotal.config(text=f"{self.total_gestos} gestos · {self.total_acciones} acciones")
